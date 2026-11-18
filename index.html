@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工程项目管理台账</title>
+<style>
+* { box-sizing: border-box }
+body { margin: 0; background: #f4f7fa; color: #172d34; font: 15px/1.6 "Microsoft YaHei", system-ui, sans-serif }
+header { background: #122e35; color: white; padding: 36px max(24px, calc((100% - 1140px)/2)) 64px }
+header p { color: #b8d8d6; margin: 6px 0 0 }
+h1, h2, p { margin: 0 }
+h1 { font-size: clamp(25px, 4vw, 36px) }
+h2 { font-size: 20px }
+main { max-width: 1188px; margin: -32px auto 0; padding: 0 24px 40px }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap: 16px; margin-bottom: 24px }
+.card, section, dialog { background: white; border: 1px solid #dae5e9; border-radius: 16px; box-shadow: 0 8px 24px #14313a0a }
+.card { padding: 19px 23px; color: #49636b }
+.card strong { display: block; color: #174b48; font-size: 29px; overflow-wrap: anywhere }
+.toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 20px 24px }
+button { cursor: pointer; font: inherit; padding: 7px 13px; border: 1px solid #ccdce0; background: white; border-radius: 8px; color: #24464d }
+button:hover { background: #edf5f5 }
+.primary { background: #087568; border-color: #087568; color: white }
+.primary:hover { background: #065b52 }
+.danger { color: #a12336 }
+.table-wrap { overflow-x: auto }
+table { width: 100%; min-width: 790px; border-collapse: collapse; text-align: left }
+th, td { padding: 14px 12px; border-top: 1px solid #e5edf0 }
+th:first-child, td:first-child { padding-left: 24px }
+th { background: #f5f8fa; color: #49636b; font-size: 13px; white-space: nowrap }
+td:first-child { font-weight: 600; overflow-wrap: anywhere; max-width: 240px }
+td:last-child { white-space: nowrap }
+td button { padding: 4px 8px; margin-right: 4px }
+progress { width: 90px; height: 9px; accent-color: #087568; vertical-align: middle; margin-right: 8px }
+dialog { width: min(460px, calc(100% - 32px)); padding: 24px }
+dialog::backdrop { background: #112d39a0 }
+label { display: grid; gap: 4px; margin-top: 12px }
+input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1px solid #adbec6; border-radius: 8px }
+.filters { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; padding: 0 24px 16px }
+.filters label { margin: 0; color: #49636b; font-size: 13px }
+.filters select { font: inherit; color: #24464d; padding: 8px 10px; background: white; border: 1px solid #adbec6; border-radius: 8px }
+.overdue { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 6px; background: #fde9ed; color: #a12336; font-size: 12px; white-space: nowrap }
+.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px }
+#empty { padding: 32px 24px; text-align: center; color: #49636b }
+#notice { margin: 0 0 16px; padding: 10px 14px; border-radius: 8px; background: #fff4d4; color: #64460d }
+.hint { color: #49636b; font-size: 13px; margin-top: 12px }
+</style>
+</head>
+<body>
+<header>
+  <h1>工程项目管理台账</h1>
+  <p>查看项目投资、负责人和完工进度</p>
+</header>
+<main>
+  <div class="stats" aria-label="项目概览">
+    <div class="card">项目总数<strong id="count">0</strong></div>
+    <div class="card">总投资（万元）<strong id="investment">0</strong></div>
+    <div class="card">进行中<strong id="active">0</strong></div>
+  </div>
+  <p id="notice" role="alert" hidden></p>
+  <section aria-labelledby="list-title">
+    <div class="toolbar">
+      <h2 id="list-title">项目列表</h2>
+      <div>
+        <button id="clear" type="button">清空演示数据</button>
+        <button id="add" class="primary" type="button">＋ 新增项目</button>
+      </div>
+    </div>
+    <div class="filters">
+      <label>搜索项目名称<input id="search" type="search" placeholder="输入项目名称"></label>
+      <label>项目状态<select id="status">
+        <option value="all">全部</option>
+        <option value="active">进行中</option>
+        <option value="completed">已完成</option>
+      </select></label>
+      <button id="export" type="button">导出当前列表 CSV</button>
+    </div>
+    <div class="table-wrap" id="table-wrap" tabindex="0" aria-label="项目明细">
+      <table>
+        <thead><tr><th>项目名称</th><th>投资金额（万元）</th><th>负责人</th><th>计划完成日期</th><th>完成进度</th><th>操作</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p id="empty" hidden>暂无项目，点击「新增项目」录入第一条记录。</p>
+  </section>
+  <p class="hint">数据保存在当前浏览器中。进度为 1% 至 99% 的项目计为进行中。</p>
+</main>
+<dialog id="editor" aria-labelledby="editor-title">
+  <form id="form">
+    <h2 id="editor-title">新增项目</h2>
+    <label>项目名称<input name="name" maxlength="120" required autofocus></label>
+    <label>投资金额（万元）<input name="amount" type="number" min="0" max="9999999999.99" step="0.01" required></label>
+    <label>负责人<input name="owner" maxlength="60" required></label>
+    <label>计划完成日期<input name="date" type="date" required></label>
+    <label>完成进度（%）<input name="progress" type="number" min="0" max="100" step="1" required></label>
+    <p id="form-error" role="alert" class="danger"></p>
+    <div class="actions">
+      <button id="cancel" type="button">取消</button>
+      <button class="primary" type="submit">保存项目</button>
+    </div>
+  </form>
+</dialog>
+<script>
+"use strict";
+
+const byId = id => document.getElementById(id);
+const storageKey = "engineering-project-ledger-v1";
+const examples = [
+  { id: "demo-1", demo: true, name: "滨河路道路改造工程", amount: 1280, owner: "张伟", date: "2027-03-31", progress: 65 },
+  { id: "demo-2", demo: true, name: "城南片区雨污分流工程", amount: 860.5, owner: "李静", date: "2027-05-20", progress: 35 },
+  { id: "demo-3", demo: true, name: "社区服务中心配套工程", amount: 420, owner: "陈明", date: "2026-10-30", progress: 100 }
+];
+const formatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
+const editor = byId("editor");
+const form = byId("form");
+const fields = form.elements;
+let projects = [];
+let editingId = null;
+
+function showNotice(message) {
+  byId("notice").textContent = message;
+  byId("notice").hidden = !message;
+}
+
+function save(next) {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(next));
+  } catch {
+    const message = "浏览器无法保存数据。请检查浏览器是否允许本地存储，再重试。";
+    showNotice(message);
+    if (editor.open) byId("form-error").textContent = message;
+    return false;
+  }
+  projects = next;
+  showNotice("");
+  render();
+  return true;
+}
+
+function action(label, handler, destructive = false) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  if (destructive) button.className = "danger";
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function isActive(project) {
+  return project.progress > 0 && project.progress < 100;
+}
+
+function localDate() {
+  const now = new Date();
+  return [now.getFullYear(), now.getMonth() + 1, now.getDate()]
+    .map(value => String(value).padStart(2, "0")).join("-");
+}
+
+function isOverdue(project, today) {
+  return project.progress < 100 && project.date < today;
+}
+
+function visibleProjects() {
+  const query = byId("search").value.trim().toLowerCase();
+  const status = byId("status").value;
+  return projects.filter(project => project.name.toLowerCase().includes(query) && (
+    status === "all" || (status === "active" ? isActive(project) : project.progress === 100)
+  ));
+}
+
+function exportCsv() {
+  const today = localDate();
+  const rows = [["项目名称", "投资金额（万元）", "负责人", "计划完成日期", "完成进度", "逾期提醒"]];
+  for (const project of visibleProjects()) {
+    rows.push([project.name, project.amount, project.owner, project.date,
+      project.progress + "%", isOverdue(project, today) ? "已逾期" : ""]);
+  }
+  const csv = rows.map(row => row.map(value => {
+    let field = String(value);
+    // Keep formula-like text as text when Excel opens the CSV.
+    if (/^\s*[=+@-]/.test(field)) field = "'" + field;
+    return '"' + field.replaceAll('"', '""') + '"';
+  }).join(",")).join("\r\n");
+  const url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "工程项目管理台账-" + today + ".csv";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function render() {
+  byId("count").textContent = projects.length;
+  const total = projects.reduce((sum, project) => sum + Math.round(project.amount * 100), 0);
+  byId("investment").textContent = formatter.format(total / 100);
+  byId("active").textContent = projects.filter(isActive).length;
+  byId("clear").hidden = !projects.some(project => project.demo);
+  const visible = visibleProjects();
+  byId("empty").hidden = visible.length > 0;
+  byId("empty").textContent = projects.length ? "没有符合当前搜索和筛选条件的项目。" : "暂无项目，点击「新增项目」录入第一条记录。";
+  byId("table-wrap").hidden = visible.length === 0;
+  byId("export").disabled = visible.length === 0;
+  const today = localDate();
+  const rows = byId("rows");
+  rows.replaceChildren();
+  for (const project of visible) {
+    const row = rows.insertRow();
+    for (const value of [project.name, formatter.format(project.amount), project.owner]) {
+      row.insertCell().textContent = value;
+    }
+    const dateCell = row.insertCell();
+    dateCell.textContent = project.date;
+    if (isOverdue(project, today)) {
+      const badge = document.createElement("span");
+      badge.className = "overdue";
+      badge.textContent = "已逾期";
+      dateCell.append(badge);
+    }
+    const bar = document.createElement("progress");
+    bar.max = 100;
+    bar.value = project.progress;
+    bar.setAttribute("aria-label", project.name + "的完成进度");
+    row.insertCell().append(bar, project.progress + "%");
+    row.insertCell().append(
+      action("编辑", () => openEditor(project)),
+      action("删除", () => {
+        if (confirm("确定删除「" + project.name + "」？")) {
+          save(projects.filter(item => item.id !== project.id));
+        }
+      }, true)
+    );
+  }
+}
+
+function openEditor(project) {
+  editingId = project?.id ?? null;
+  form.reset();
+  byId("form-error").textContent = "";
+  byId("editor-title").textContent = project ? "编辑项目" : "新增项目";
+  for (const name of ["name", "amount", "owner", "date", "progress"]) {
+    fields.namedItem(name).value = project?.[name] ?? (name === "progress" ? 0 : "");
+  }
+  editor.showModal();
+}
+
+byId("search").addEventListener("input", render);
+byId("status").addEventListener("change", render);
+byId("export").addEventListener("click", exportCsv);
+byId("add").addEventListener("click", () => openEditor());
+byId("cancel").addEventListener("click", () => editor.close());
+byId("clear").addEventListener("click", () => {
+  if (confirm("确定清空演示项目？你新增的项目会保留。")) {
+    save(projects.filter(project => !project.demo));
+  }
+});
+form.addEventListener("submit", event => {
+  event.preventDefault();
+  const data = new FormData(form);
+  const name = data.get("name").trim();
+  const owner = data.get("owner").trim();
+  if (!name || !owner) {
+    byId("form-error").textContent = "请输入项目名称和负责人。";
+    fields.namedItem(!name ? "name" : "owner").focus();
+    return;
+  }
+  const values = {
+    name, owner, amount: Number(data.get("amount")),
+    date: data.get("date"), progress: Number(data.get("progress"))
+  };
+  const next = editingId
+    ? projects.map(project => project.id === editingId ? { ...project, ...values } : project)
+    : [{ id: Date.now().toString(36) + "-" + Math.random().toString(36).slice(2), ...values }, ...projects];
+  if (save(next)) editor.close();
+});
+
+try {
+  const stored = localStorage.getItem(storageKey);
+  if (stored === null) {
+    projects = examples;
+    save(examples);
+  } else {
+    const parsed = JSON.parse(stored);
+    if (!Array.isArray(parsed)) throw new Error("Invalid project data");
+    projects = parsed;
+  }
+} catch {
+  showNotice("无法读取本地台账。请检查浏览器的本地存储设置。");
+}
+render();
+</script>
+</body>
+</html>
