@@ -42,8 +42,10 @@ input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1
 .overdue { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 6px; background: #fde9ed; color: #a12336; font-size: 12px; white-space: nowrap }
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px }
 #empty { padding: 32px 24px; text-align: center; color: #49636b }
-#notice { margin: 0 0 16px; padding: 10px 14px; border-radius: 8px; background: #fff4d4; color: #64460d }
+#notice { margin: 0 0 16px; padding: 10px 14px; border-radius: 8px; background: #fff4d4; color: #64460d; white-space: pre-wrap; overflow-wrap: anywhere }
 .hint { color: #49636b; font-size: 13px; margin-top: 12px }
+.account { padding: 20px 24px; margin-bottom: 18px }
+[hidden] { display: none !important }
 </style>
 </head>
 <body>
@@ -52,6 +54,20 @@ input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1
   <p>查看项目投资、负责人和完工进度</p>
 </header>
 <main>
+  <section class="account" aria-labelledby="account-title">
+    <h2 id="account-title">云端账号</h2>
+    <p id="auth-message" role="status">正在初始化登录…</p>
+    <form id="auth-form" hidden>
+      <label>邮箱<input name="email" type="email" autocomplete="email" required></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <div class="actions">
+        <button name="mode" value="login" type="submit" class="primary">登录</button>
+        <button name="mode" value="signup" type="submit">注册</button>
+      </div>
+    </form>
+    <button id="logout" type="button" hidden>退出登录</button>
+  </section>
+  <div id="ledger" hidden>
   <div class="stats" aria-label="项目概览">
     <div class="card">项目总数<strong id="count">0</strong></div>
     <div class="card">总投资（万元）<strong id="investment">0</strong></div>
@@ -62,7 +78,7 @@ input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1
     <div class="toolbar">
       <h2 id="list-title">项目列表</h2>
       <div>
-        <button id="clear" type="button">清空演示数据</button>
+        <button id="reload" type="button">刷新列表</button>
         <button id="add" class="primary" type="button">＋ 新增项目</button>
       </div>
     </div>
@@ -83,7 +99,8 @@ input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1
     </div>
     <p id="empty" hidden>暂无项目，点击「新增项目」录入第一条记录。</p>
   </section>
-  <p class="hint">数据保存在当前浏览器中。进度为 1% 至 99% 的项目计为进行中。</p>
+  <p class="hint">项目保存在当前登录账号的云端台账中。进度为 1% 至 99% 的项目计为进行中。</p>
+  </div>
 </main>
 <dialog id="editor" aria-labelledby="editor-title">
   <form id="form">
@@ -100,41 +117,131 @@ input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1
     </div>
   </form>
 </dialog>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
 <script>
 "use strict";
 
 const byId = id => document.getElementById(id);
-const storageKey = "engineering-project-ledger-v1";
-const examples = [
-  { id: "demo-1", demo: true, name: "滨河路道路改造工程", amount: 1280, owner: "张伟", date: "2027-03-31", progress: 65 },
-  { id: "demo-2", demo: true, name: "城南片区雨污分流工程", amount: 860.5, owner: "李静", date: "2027-05-20", progress: 35 },
-  { id: "demo-3", demo: true, name: "社区服务中心配套工程", amount: 420, owner: "陈明", date: "2026-10-30", progress: 100 }
-];
 const formatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
 const editor = byId("editor");
 const form = byId("form");
 const fields = form.elements;
 let projects = [];
 let editingId = null;
+let client;
+let user;
+let accountVersion = 0;
+let busy = false;
+const projectColumns = "id,name,investment,manager,deadline,progress";
 
 function showNotice(message) {
   byId("notice").textContent = message;
   byId("notice").hidden = !message;
 }
 
-function save(next) {
+function projectReadDiagnostic(error, status) {
+  const code = error?.code;
+  const advice = {
+    "42501": "检查 authenticated 角色的 SELECT 授权和当前用户适用的 RLS 策略。",
+    "42703": "检查返回信息中提到的字段是否存在于 public.projects。",
+    "PGRST204": "检查字段名称，以及 API 是否识别当前表结构。",
+    "PGRST205": "检查当前 Supabase 项目中的 public.projects 是否存在并可通过 Data API 访问。",
+    "42P01": "检查当前 Supabase 项目中的 public.projects 是否存在。",
+    "PGRST301": "请退出后重新登录，再刷新列表。",
+    "PGRST303": "请退出后重新登录，再刷新列表。"
+  };
+  const next = (Object.hasOwn(advice, code) ? advice[code] : "") || (
+    status === 0 || error?.name === "TypeError" ? "浏览器未收到 HTTP 响应。请在「网络」面板查看请求是否被拦截或连接失败。" :
+    status === 401 ? "请重新登录，并确认项目地址与 Publishable key 来自同一个 Supabase 项目。" : ""
+  );
+  return [
+    "请求：读取 public.projects",
+    `HTTP 状态：${status === 0 ? "未收到响应" : status ?? "未知"} · 错误代码：${code || "未提供"}`,
+    "错误描述：" + (error?.message || "未提供"),
+    error?.details && "详情：" + error.details,
+    error?.hint && "Supabase 提示：" + error.hint,
+    next
+  ].filter(Boolean).join("\n");
+}
+
+function reportProjectReadFailure(title, failure) {
+  const diagnostic = projectReadDiagnostic(failure.cause ?? failure, failure.status);
+  showNotice(title + "\n" + diagnostic);
+  console.warn("[工程台账] " + diagnostic);
+}
+
+async function loadProjects(version) {
+  const accountId = user.id;
+  const result = [];
+  const batch = 100;
+  for (let offset = 0; ; offset += batch) {
+    const { data, error, status } = await client.from("projects").select(projectColumns)
+      .eq("user_id", accountId).order("created_at", { ascending: false })
+      .order("id").range(offset, offset + batch - 1);
+    if (version !== accountVersion) return;
+    if (error) {
+      throw Object.assign(new Error("读取项目失败", { cause: error }), { status });
+    }
+    result.push(...data);
+    if (data.length < batch) break;
+  }
+  projects = result.map(row => ({
+    id: row.id, name: row.name, amount: Number(row.investment),
+    owner: row.manager, date: row.deadline, progress: Number(row.progress)
+  }));
+  render();
+}
+
+async function refresh() {
+  if (!user || busy) return;
+  const version = accountVersion;
+  setBusy(true);
+  showNotice("");
   try {
-    localStorage.setItem(storageKey, JSON.stringify(next));
+    await loadProjects(version);
+  } catch (error) {
+    if (version === accountVersion) reportProjectReadFailure("无法读取云端项目。", error);
+  } finally {
+    if (version === accountVersion) setBusy(false);
+  }
+}
+
+function setBusy(value) {
+  busy = value;
+  for (const id of ["add", "reload"]) byId(id).disabled = value;
+  form.querySelector('[type="submit"]').disabled = value;
+}
+
+async function changeProjects(request, closeEditor = false) {
+  if (!user || busy) return;
+  const version = accountVersion;
+  const accountId = user.id;
+  setBusy(true);
+  showNotice("");
+  try {
+    const { data, error } = await request(accountId).select("id");
+    if (version !== accountVersion) return;
+    if (error) throw error;
+    if (data.length !== 1) {
+      throw new Error("Project no longer available");
+    }
+    if (closeEditor) editor.close();
+    try {
+      await loadProjects(version);
+    } catch (error) {
+      if (version === accountVersion) {
+        reportProjectReadFailure("修改已保存，但列表刷新失败。请点击「刷新列表」。", error);
+      }
+    }
   } catch {
-    const message = "浏览器无法保存数据。请检查浏览器是否允许本地存储，再重试。";
+    if (version !== accountVersion) return;
+    const message = "未能确认操作结果。请检查网络和权限，刷新列表后再决定是否重试。";
     showNotice(message);
     if (editor.open) byId("form-error").textContent = message;
-    return false;
+  } finally {
+    if (version === accountVersion) setBusy(false);
   }
-  projects = next;
-  showNotice("");
-  render();
-  return true;
 }
 
 function action(label, handler, destructive = false) {
@@ -196,7 +303,6 @@ function render() {
   const total = projects.reduce((sum, project) => sum + Math.round(project.amount * 100), 0);
   byId("investment").textContent = formatter.format(total / 100);
   byId("active").textContent = projects.filter(isActive).length;
-  byId("clear").hidden = !projects.some(project => project.demo);
   const visible = visibleProjects();
   byId("empty").hidden = visible.length > 0;
   byId("empty").textContent = projects.length ? "没有符合当前搜索和筛选条件的项目。" : "暂无项目，点击「新增项目」录入第一条记录。";
@@ -226,8 +332,8 @@ function render() {
     row.insertCell().append(
       action("编辑", () => openEditor(project)),
       action("删除", () => {
-        if (confirm("确定删除「" + project.name + "」？")) {
-          save(projects.filter(item => item.id !== project.id));
+        if (!busy && confirm("确定删除「" + project.name + "」？")) {
+          changeProjects(id => client.from("projects").delete().eq("user_id", id).eq("id", project.id));
         }
       }, true)
     );
@@ -235,6 +341,7 @@ function render() {
 }
 
 function openEditor(project) {
+  if (!user || busy) return;
   editingId = project?.id ?? null;
   form.reset();
   byId("form-error").textContent = "";
@@ -249,12 +356,8 @@ byId("search").addEventListener("input", render);
 byId("status").addEventListener("change", render);
 byId("export").addEventListener("click", exportCsv);
 byId("add").addEventListener("click", () => openEditor());
+byId("reload").addEventListener("click", refresh);
 byId("cancel").addEventListener("click", () => editor.close());
-byId("clear").addEventListener("click", () => {
-  if (confirm("确定清空演示项目？你新增的项目会保留。")) {
-    save(projects.filter(project => !project.demo));
-  }
-});
 form.addEventListener("submit", event => {
   event.preventDefault();
   const data = new FormData(form);
@@ -266,29 +369,123 @@ form.addEventListener("submit", event => {
     return;
   }
   const values = {
-    name, owner, amount: Number(data.get("amount")),
-    date: data.get("date"), progress: Number(data.get("progress"))
+    name, manager: owner, investment: Number(data.get("amount")),
+    deadline: data.get("date"), progress: Number(data.get("progress"))
   };
-  const next = editingId
-    ? projects.map(project => project.id === editingId ? { ...project, ...values } : project)
-    : [{ id: Date.now().toString(36) + "-" + Math.random().toString(36).slice(2), ...values }, ...projects];
-  if (save(next)) editor.close();
+  const projectId = editingId;
+  changeProjects(id => projectId
+    ? client.from("projects").update(values).eq("user_id", id).eq("id", projectId)
+    : client.from("projects").insert({ ...values, user_id: id }), true);
 });
 
-try {
-  const stored = localStorage.getItem(storageKey);
-  if (stored === null) {
-    projects = examples;
-    save(examples);
-  } else {
-    const parsed = JSON.parse(stored);
-    if (!Array.isArray(parsed)) throw new Error("Invalid project data");
-    projects = parsed;
-  }
-} catch {
-  showNotice("无法读取本地台账。请检查浏览器的本地存储设置。");
+const authForm = byId("auth-form");
+const authMessage = byId("auth-message");
+let authReady = false;
+let refreshTimer;
+
+function applySession(session) {
+  const next = session?.user;
+  if (authReady && user?.id === next?.id) return;
+  authReady = true;
+  accountVersion += 1;
+  user = next;
+  clearTimeout(refreshTimer);
+  if (editor.open) editor.close();
+  projects = [];
+  byId("search").value = "";
+  byId("status").value = "all";
+  showNotice("");
+  setBusy(false);
+  render();
+  byId("ledger").hidden = !user;
+  byId("logout").hidden = !user;
+  authForm.hidden = Boolean(user);
+  authForm.reset();
+  authMessage.textContent = user ? "当前账号 " + (user.email ?? "") : "请登录，或使用邮箱注册。";
+  if (user) refreshTimer = setTimeout(refresh, 0);
 }
-render();
+
+authForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  const signup = event.submitter?.value === "signup";
+  const fields = new FormData(authForm);
+  const email = fields.get("email").trim();
+  const password = fields.get("password");
+  const buttons = authForm.querySelectorAll("button");
+  buttons.forEach(button => { button.disabled = true; });
+  authMessage.textContent = signup ? "正在提交注册…" : "正在登录…";
+  try {
+    const callback = location.origin + location.pathname;
+    const { data, error } = signup
+      ? await client.auth.signUp({ email, password, options: { emailRedirectTo: callback } })
+      : await client.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    if (data.session) {
+      applySession(data.session);
+    } else if (signup) {
+      authForm.elements.namedItem("password").value = "";
+      authMessage.textContent = "如果该邮箱可注册，请查收验证邮件。在注册时使用的浏览器中打开链接，再返回登录。";
+    }
+  } catch (error) {
+    authMessage.textContent = ({
+      email_not_confirmed: "邮箱尚未验证，请先打开验证邮件。",
+      invalid_credentials: "邮箱或密码不正确。",
+      signup_disabled: "项目未启用邮箱注册。",
+      weak_password: "密码不符合要求，请使用更强的密码。",
+      over_email_send_rate_limit: "邮件发送过于频繁，请稍后重试。"
+    })[error.code] ?? (signup ? "注册失败，请检查网络和邮箱认证设置。" : "登录失败，请检查网络后重试。");
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+  }
+});
+
+byId("logout").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const { error } = await client.auth.signOut({ scope: "local" });
+    if (error) throw error;
+    applySession(null);
+  } catch {
+    authMessage.textContent = "退出操作未完成，请刷新页面确认登录状态。";
+  } finally {
+    button.disabled = false;
+  }
+});
+
+function start() {
+  const config = window.SUPABASE_CONFIG;
+  if (!config?.publishableKey?.startsWith("sb_publishable_")) {
+    authMessage.textContent = "请在 config.js 填写 sb_publishable_ 开头的 Publishable key。";
+    return;
+  }
+  if (!["http:", "https:"].includes(location.protocol)) {
+    authMessage.textContent = "请通过本地预览地址或 HTTPS 网站打开台账。";
+    return;
+  }
+  if (!window.supabase) {
+    authMessage.textContent = "无法加载 Supabase 登录组件，请检查网络后刷新。";
+    return;
+  }
+  try {
+    client = window.supabase.createClient(config.projectUrl, config.publishableKey, {
+      auth: { flowType: "pkce" }
+    });
+    const callbackParams = new URLSearchParams(location.search);
+    const callbackFailed = callbackParams.has("error") ||
+      new URLSearchParams(location.hash.slice(1)).has("error");
+    client.auth.onAuthStateChange((event, session) => {
+      applySession(session);
+      if (event === "INITIAL_SESSION" && !session &&
+          (callbackFailed || callbackParams.has("code"))) {
+        authMessage.textContent = "验证链接未能建立登录会话。请尝试用已验证的邮箱登录，或检查链接是否过期及浏览器是否相同。";
+      }
+    });
+  } catch {
+    authMessage.textContent = "连接设置无效，请检查 config.js 中的项目地址和 Publishable key。";
+  }
+}
+start();
 </script>
 </body>
 </html>
