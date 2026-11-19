@@ -45,6 +45,8 @@ input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1
 #notice { margin: 0 0 16px; padding: 10px 14px; border-radius: 8px; background: #fff4d4; color: #64460d; white-space: pre-wrap; overflow-wrap: anywhere }
 .hint { color: #49636b; font-size: 13px; margin-top: 12px }
 .account { padding: 20px 24px; margin-bottom: 18px }
+#ai-report { white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f8fa; padding: 14px; border-radius: 8px }
+#ai-panel { width: min(720px, calc(100% - 32px)); max-height: 85vh }
 [hidden] { display: none !important }
 </style>
 </head>
@@ -79,6 +81,7 @@ input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1
       <h2 id="list-title">项目列表</h2>
       <div>
         <button id="reload" type="button">刷新列表</button>
+        <button id="ai-open" type="button">AI 分析中心</button>
         <button id="add" class="primary" type="button">＋ 新增项目</button>
       </div>
     </div>
@@ -102,6 +105,22 @@ input { font: inherit; color: inherit; padding: 8px 10px; width: 100%; border: 1
   <p class="hint">项目保存在当前登录账号的云端台账中。进度为 1% 至 99% 的项目计为进行中。</p>
   </div>
 </main>
+<dialog id="ai-panel" aria-labelledby="ai-title">
+  <h2 id="ai-title">AI 分析中心</h2>
+  <p class="hint">分析会将项目名称、投资金额、负责人、计划完成日期和进度发送给 OpenAI。单次最多 20 项，每账号每日最多 5 次。</p>
+  <label>当前项目<select id="ai-project"></select></label>
+  <div class="actions">
+    <button id="ai-single" type="button" class="primary">分析当前项目</button>
+    <button id="ai-all" type="button">分析全部项目</button>
+    <button id="ai-close" type="button">关闭</button>
+  </div>
+  <p id="ai-status" role="status"></p>
+  <p id="ai-report" hidden></p>
+  <div class="actions" id="ai-tools" hidden>
+    <button id="ai-copy" type="button">复制报告</button>
+    <button id="ai-export" type="button">导出报告</button>
+  </div>
+</dialog>
 <dialog id="editor" aria-labelledby="editor-title">
   <form id="form">
     <h2 id="editor-title">新增项目</h2>
@@ -331,6 +350,7 @@ function render() {
     row.insertCell().append(bar, project.progress + "%");
     row.insertCell().append(
       action("编辑", () => openEditor(project)),
+      action("AI 分析", () => openAnalysis(project.id)),
       action("删除", () => {
         if (!busy && confirm("确定删除「" + project.name + "」？")) {
           changeProjects(id => client.from("projects").delete().eq("user_id", id).eq("id", project.id));
@@ -383,11 +403,125 @@ const authMessage = byId("auth-message");
 let authReady = false;
 let refreshTimer;
 
+const aiPanel = byId("ai-panel");
+const aiPicker = byId("ai-project");
+const aiStatus = byId("ai-status");
+const aiReport = byId("ai-report");
+let analyzing = false;
+let analysisController;
+
+function syncAnalysisButtons() {
+  byId("ai-single").disabled = analyzing || !aiPicker.value;
+  byId("ai-all").disabled = analyzing;
+}
+
+function showReport(text) {
+  aiReport.textContent = text;
+  aiReport.hidden = !text;
+  byId("ai-tools").hidden = !text;
+}
+
+function openAnalysis(projectId) {
+  if (!user) return;
+  aiPicker.replaceChildren();
+  for (const project of projects) {
+    const option = document.createElement("option");
+    option.value = project.id;
+    option.textContent = project.name;
+    aiPicker.append(option);
+  }
+  if (projectId) aiPicker.value = projectId;
+  syncAnalysisButtons();
+  if (!aiPanel.open) aiPanel.showModal();
+}
+
+async function analyze(scope) {
+  if (!user || analyzing || (scope === "single" && !aiPicker.value)) return;
+  const version = accountVersion;
+  const controller = new AbortController();
+  analysisController = controller;
+  analyzing = true;
+  syncAnalysisButtons();
+  showReport("");
+  aiStatus.textContent = "正在生成分析报告，请稍候…";
+  const messages = {
+    LOGIN: "登录已失效，请重新登录后重试。",
+    EMPTY: "没有可分析的项目，请刷新台账后重试。",
+    TOO_MANY: "全部项目超过 20 项，请选择单个项目分析。",
+    RATE: "今天的 5 次分析额度已用完，额度在北京时间每天 08:00 重置。",
+    QUOTA: "OpenAI 余额或额度不足，请联系管理员检查账单和用量。",
+    UPSTREAM_RATE: "AI 服务当前请求过多，请稍后重试。",
+    SETUP: "AI 分析尚未配置，请联系管理员。",
+    RATE_SETUP: "分析次数限制尚未配置，请联系管理员。"
+  };
+  try {
+    const body = scope === "single" ? { scope, projectId: aiPicker.value } : { scope };
+    const { data, error } = await client.functions.invoke("analyze-projects", { body, signal: controller.signal });
+    if (version !== accountVersion) return;
+    if (error) {
+      const payload = await error.context?.json?.().catch(() => null);
+      if (version !== accountVersion) return;
+      const code = payload?.code ?? (error.context?.status === 401 ? "LOGIN" : "");
+      aiStatus.textContent = Object.hasOwn(messages, code) ? messages[code] : "分析失败，请稍后重新点击分析。";
+      return;
+    }
+    const lines = [
+      "工程项目 AI 分析报告",
+      `分析日期 ${data.today}（北京时间）｜覆盖 ${data.count} 个项目`,
+      data.overdue.length ? "已逾期且未完成：" + data.overdue.join("、") : "未发现按现有字段可确认的逾期项目。",
+      "台账缺少计划进度、进度统计日期和关键节点，无法准确判断实际进度是否落后于计划。",
+      ...data.sections.map(section => section.title + "\n" + section.text)
+    ];
+    showReport(lines.join("\n\n"));
+    aiStatus.textContent = "报告已生成。";
+  } catch {
+    if (version === accountVersion) aiStatus.textContent = "分析失败，请稍后重新点击分析。";
+  } finally {
+    if (version === accountVersion) {
+      analysisController = undefined;
+      analyzing = false;
+      syncAnalysisButtons();
+    }
+  }
+}
+
+byId("ai-open").addEventListener("click", () => openAnalysis());
+byId("ai-close").addEventListener("click", () => aiPanel.close());
+aiPicker.addEventListener("change", syncAnalysisButtons);
+byId("ai-single").addEventListener("click", () => analyze("single"));
+byId("ai-all").addEventListener("click", () => analyze("all"));
+byId("ai-copy").addEventListener("click", async () => {
+  const version = accountVersion;
+  try {
+    await navigator.clipboard.writeText(aiReport.textContent);
+    if (version === accountVersion) aiStatus.textContent = "已复制报告。";
+  } catch {
+    if (version === accountVersion) aiStatus.textContent = "复制失败，可以手动选中文本或导出报告。";
+  }
+});
+byId("ai-export").addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob(["\uFEFF", aiReport.textContent], { type: "text/plain;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "工程项目AI分析-" + localDate() + ".txt";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
 function applySession(session) {
   const next = session?.user;
   if (authReady && user?.id === next?.id) return;
   authReady = true;
   accountVersion += 1;
+  analysisController?.abort();
+  analysisController = undefined;
+  analyzing = false;
+  if (aiPanel.open) aiPanel.close();
+  aiPicker.replaceChildren();
+  showReport("");
+  aiStatus.textContent = "";
   user = next;
   clearTimeout(refreshTimer);
   if (editor.open) editor.close();
